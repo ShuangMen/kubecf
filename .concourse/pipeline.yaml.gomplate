@@ -1,24 +1,14 @@
 # load the config provided when evaluating the template
 {{ $config := (datasource "config") }}
 
-# Variables
-{{ $availableCfSchedulers := slice "diego" "eirini" }} # Diego / Eirini
-{{ $pr_resources := slice "pr" "fork-pr" }}
-{{ $branches := slice "master" "release-2.2"}} # Repository branches to track
-
 # Split Concourse jobs in tabs (aka groups)
 # We split by "branch" and we also split the "experimental" jobs of each branch.
 
-# Stable Jobs
-# TODO: Delete the special case here as soon as we get Eirini CATS green and we stabilize Eirini smoke (e.g. with a more large timeout)
-{{ $stable := slice "lint" "build" "deploy-diego" "deploy-eirini" "smoke-tests-diego" "smoke-tests-eirini" "cf-acceptance-tests-diego" "cleanup-diego-cluster" "cleanup-eirini-cluster" }}
-{{ $experimental := slice "cf-acceptance-tests-eirini" "cats-internetless-diego" "cats-internetless-eirini" "sync-integration-tests" "ccdb-rotate-diego" "ccdb-rotate-eirini" "smoke-tests-post-rotate-diego" "smoke-tests-post-rotate-eirini" "upgrade-test" }}
-
 groups:
-{{ range $_, $branch := (flatten (slice $branches $pr_resources) | uniq) }}
+{{ range $_, $branch := (flatten (slice $config.branches $config.pr_resources) | uniq) }}
 - name: {{ $branch }}
   jobs:
-  {{ range $_, $job := $stable }}
+  {{ range $_, $job := $config.stable_jobs }}
   - {{ $job }}-{{ $branch }}
   {{ end }}
   {{ if not ($branch | regexp.Match "^pr|fork-pr") }}
@@ -26,7 +16,7 @@ groups:
   {{ end }}
 - name: {{ $branch }}-experimental
   jobs:
-  {{ range $_, $job := $experimental }}
+  {{ range $_, $job := $config.experimental_jobs }}
   - {{ $job }}-{{ $branch }}
   {{ end }}
 {{ end }}
@@ -53,8 +43,8 @@ resources:
     repository: kubecf
     access_token: ((github-access-token))
 
-{{ range $_, $branch := (flatten (slice $branches $pr_resources) | uniq) }}
-{{- range $_, $cfScheduler := $availableCfSchedulers }}
+{{ range $_, $branch := (flatten (slice $config.branches $config.pr_resources) | uniq) }}
+{{- range $_, $cfScheduler := $config.availableCfSchedulers }}
 - name: semver.gke-cluster-{{ $branch }}-{{ $cfScheduler }}
   type: semver
   source:
@@ -80,7 +70,7 @@ resources:
 {{ end }} # prs and branches (flattened)
 
 
-{{- range $_, $branch := $branches }}
+{{- range $_, $branch := $config.branches }}
 - name: kubecf-{{ $branch }}
   type: git
   source:
@@ -113,7 +103,7 @@ resources:
     disable_forks: false # Trigger on kubecf branches only
     required_review_approvals: 1
 
-{{- range $_, $pr := $pr_resources }}
+{{- range $_, $pr := $config.pr_resources }}
 
 {{- if $config.github_status }}
 - name: status-{{$pr}}.src
@@ -306,7 +296,7 @@ rotate_args: &rotate_args
 jobs:
 
 {{ $path := "" }}
-{{- range $_, $branch := flatten (slice $branches $pr_resources)  }}
+{{- range $_, $branch := flatten (slice $config.branches $config.pr_resources)  }}
 
 {{ if or (eq $branch "fork-pr") (eq $branch "pr" )}}
 {{ $path = ".git/resource/head_sha" }}
@@ -323,7 +313,7 @@ jobs:
     trigger: true
 {{- end }}
     version: "every"
-{{- if has $stable "lint" }}
+{{- if has $config.stable_jobs "lint" }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &lint_{{ $sanitized_branch_name }}_status
@@ -354,7 +344,7 @@ jobs:
           ./dev/linters/helmlint.sh
           bazel test //rules/kubecf:create_sample_values_test
 
-{{- if has $stable "lint" }}
+{{- if has $config.stable_jobs "lint" }}
     {{- if $config.github_status }}
     on_success:
       put: status-{{ $branch }}.src
@@ -377,7 +367,7 @@ jobs:
     version: "every"
     passed:
     - lint-{{ $branch }}
-{{- if has $stable "build" }}
+{{- if has $config.stable_jobs "build" }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &build_{{ $sanitized_branch_name }}_status
@@ -411,7 +401,7 @@ jobs:
               mv "$file" "${file%.tgz}-${timestamp}.tgz"
           done
 
-{{- if has $stable "build" }}
+{{- if has $config.stable_jobs "build" }}
     {{- if $config.github_status }}
     on_success:
       put: status-{{ $branch }}.src
@@ -434,7 +424,7 @@ jobs:
       file: output/kubecf-bundle-v*.tgz
       acl: public-read
 
-{{- range $_, $cfScheduler := $availableCfSchedulers }}
+{{- range $_, $cfScheduler := $config.availableCfSchedulers }}
 
 # prod-jobs
 - name: deploy-{{ $cfScheduler }}-{{ $branch }}
@@ -454,7 +444,7 @@ jobs:
     passed:
     - build-{{ $branch }}
   - get: catapult
-{{- if has $stable (printf "deploy-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "deploy-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &deploy_{{ $cfScheduler }}_{{ $sanitized_branch_name }}_status
@@ -492,7 +482,7 @@ jobs:
       run:
         path: "/bin/bash"
         args: *deploy_args
-{{- if has $stable (printf "deploy-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "deploy-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   on_success:
     do:
@@ -504,7 +494,7 @@ jobs:
 {{- end }}
   on_failure:
     in_parallel:
-{{- if has $stable (printf "deploy-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "deploy-%s" $cfScheduler) }}
   {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -589,7 +579,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "deploy-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "deploy-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -605,7 +595,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "deploy-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "deploy-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -635,7 +625,7 @@ jobs:
     - deploy-{{ $cfScheduler }}-{{ $branch }}
     trigger: true
   - get: catapult
-{{- if has $stable (printf "smoke-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-tests-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &smoke_{{ $cfScheduler }}_{{ $sanitized_branch_name }}_status
@@ -667,7 +657,7 @@ jobs:
       run:
         path: "/bin/bash"
         args: *test_args
-{{- if has $stable (printf "smoke-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-tests-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   on_success:
     put: status-{{ $branch }}.src
@@ -678,7 +668,7 @@ jobs:
 {{- end }}
   on_failure:
     in_parallel:
-{{- if has $stable (printf "smoke-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-tests-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -699,7 +689,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "smoke-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-tests-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -715,7 +705,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "smoke-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-tests-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -744,7 +734,7 @@ jobs:
     - {{ $previousTest | quote }}
     trigger: true
   - get: catapult
-{{- if has $stable (printf "cf-acceptance-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cf-acceptance-tests-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &cats_{{ $cfScheduler }}_{{ $sanitized_branch_name }}_status
@@ -777,7 +767,7 @@ jobs:
         path: "/bin/bash"
         args: *test_args
 
-{{- if has $stable (printf "cf-acceptance-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cf-acceptance-tests-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   on_success:
     put: status-{{ $branch }}.src
@@ -794,7 +784,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "cf-acceptance-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cf-acceptance-tests-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -810,7 +800,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "cf-acceptance-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cf-acceptance-tests-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -826,7 +816,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "cf-acceptance-tests-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cf-acceptance-tests-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -855,7 +845,7 @@ jobs:
     - {{ $previousTest | quote }}
     trigger: true
   - get: catapult
-{{- if has $stable (printf "cats-internetless-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cats-internetless-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &cats_internetless_{{ $cfScheduler }}_{{ $sanitized_branch_name }}_status
@@ -889,7 +879,7 @@ jobs:
         path: "/bin/bash"
         args: *test_args
 
-{{- if has $stable (printf "cats-internetless-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cats-internetless-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   on_success:
     put: status-{{ $branch }}.src
@@ -905,7 +895,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "cats-internetless-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cats-internetless-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -921,7 +911,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "cats-internetless-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cats-internetless-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -937,7 +927,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "cats-internetless-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "cats-internetless-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -969,7 +959,7 @@ jobs:
     - {{ $previousTest | quote }}
     trigger: true
   - get: catapult
-{{- if has $stable "sync-integration-tests" }}
+{{- if has $config.stable_jobs "sync-integration-tests" }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &sits_{{ $sanitized_branch_name }}_status
@@ -1001,7 +991,7 @@ jobs:
       run:
         path: "/bin/bash"
         args: *test_args
-{{- if has $stable "sync-integration-tests" }}
+{{- if has $config.stable_jobs "sync-integration-tests" }}
   {{- if $config.github_status }}
   on_success:
     put: status-{{ $branch }}.src
@@ -1012,7 +1002,7 @@ jobs:
 {{- end }}
   on_failure:
     in_parallel:
-{{- if has $stable "sync-integration-tests" }}
+{{- if has $config.stable_jobs "sync-integration-tests" }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1033,7 +1023,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable "sync-integration-tests" }}
+{{- if has $config.stable_jobs "sync-integration-tests" }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1050,7 +1040,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable "sync-integration-tests" }}
+{{- if has $config.stable_jobs "sync-integration-tests" }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1080,7 +1070,7 @@ jobs:
     - {{ $previousTest | quote }}
     trigger: true
   - get: catapult
-{{- if has $stable (printf "rotate-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "rotate-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &rotate_{{ $cfScheduler }}_{{ $sanitized_branch_name }}_status
@@ -1112,7 +1102,7 @@ jobs:
         path: "/bin/bash"
         args: *rotate_args
 
-{{- if has $stable (printf "rotate-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "rotate-%s" $cfScheduler) }}
   {{- if $config.github_status }}
   on_success:
     put: status-{{ $branch }}.src
@@ -1124,7 +1114,7 @@ jobs:
 
   on_failure:
     in_parallel:
-{{- if has $stable (printf "rotate-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "rotate-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1145,7 +1135,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "rotate-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "rotate-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1161,7 +1151,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "rotate-%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "rotate-%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1190,7 +1180,7 @@ jobs:
     - {{ $previousTest | quote }}
     trigger: true
   - get: catapult
-{{- if has $stable (printf "smoke-rotated-{%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-rotated-{%s" $cfScheduler) }}
   {{- if $config.github_status }}
   - put: status-{{ $branch }}.src
     params: &smoke_rotate_{{ $cfScheduler }}_{{ $sanitized_branch_name }}_status
@@ -1223,7 +1213,7 @@ jobs:
         path: "/bin/bash"
         args: *test_args
 
-{{- if has $stable (printf "smoke-rotated-{%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-rotated-{%s" $cfScheduler) }}
   {{- if $config.github_status }}
   on_success:
     put: status-{{ $branch }}.src
@@ -1235,7 +1225,7 @@ jobs:
 
   on_failure:
     in_parallel:
-{{- if has $stable (printf "smoke-rotated-{%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-rotated-{%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1256,7 +1246,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "smoke-rotated-{%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-rotated-{%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
@@ -1272,7 +1262,7 @@ jobs:
         params:
           BRANCH: {{ $branch }}
           CFSCHEDULER: {{ $cfScheduler }}
-{{- if has $stable (printf "smoke-rotated-{%s" $cfScheduler) }}
+{{- if has $config.stable_jobs (printf "smoke-rotated-{%s" $cfScheduler) }}
     {{- if $config.github_status }}
     - try:
         put: status-{{ $branch }}.src
